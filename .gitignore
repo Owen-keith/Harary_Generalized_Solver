@@ -1,0 +1,27 @@
+# Python
+snaky-r1/__pycache__/
+snaky-r1/envs/__pycache__/
+snaky-r1/models/__pycache__/
+snaky-r1/rl/__pycache__/
+snaky-r1/utils/__pycache__/
+snaky-r1/*.pyc
+snaky-r1/*.pyo
+snaky-r1/*.pyd
+snaky-r1/*.egg-info/
+snaky-r1/dist/
+snaky-r1/build/
+
+# Virtual env
+snaky-r1/.venv/
+
+# OS / editor
+snaky-r1/.DS_Store
+snaky-r1/.vscode/
+snaky-r1/.idea/
+
+# Logs / runs
+snaky-r1/runs/
+snaky-r1/logs/
+snaky-r1/checkpoints/
+snaky-r1/*.pt
+snaky-r1/*.pth

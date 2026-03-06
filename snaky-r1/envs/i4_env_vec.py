@@ -12,9 +12,7 @@ def precompute_i4_win_masks(size: int = 7) -> np.ndarray:
     """
     Returns a uint64 array of shape (num_masks,) where each entry is a bitmask
     for a horizontal or vertical run of length 4.
-    For size=7: horizontal masks: 7 rows * (7-4+1)=4 starts = 28
-                vertical masks:   7 cols * 4 starts = 28
-                total = 56
+    For size=7: total = 56.
     """
     masks = []
     L = 4
@@ -51,10 +49,13 @@ class StepResult:
 
 class I4EnvVec:
     """
-    Vectorized 7x7 maker-maker generalized tic-tac-toe environment
-    with goal = I-tetromino (4 in a row) horizontally or vertically.
-    Observations are stored as two bitboards (me, opp) from POV of player-to-move.
-    After each nonterminal step, we swap (me, opp) so next player sees 'me' as themselves.
+    Vectorized 7x7 maker-maker environment
+    goal = I-tetromino (4 in a row) horizontally or vertically.
+
+    State stored as two bitboards from POV of player-to-move:
+      - me_bits: current player stones
+      - opp_bits: opponent stones
+    After each nonterminal move, swap (me_bits, opp_bits).
     """
 
     def __init__(self, n_envs: int, size: int = 7, seed: int | None = None, check_legal: bool = False):
@@ -68,12 +69,10 @@ class I4EnvVec:
         self.win_masks = precompute_i4_win_masks(size=self.size)  # (56,)
         self.full_mask = (np.uint64(1) << np.uint64(self.size * self.size)) - np.uint64(1)
 
-        # State arrays
         self.me_bits = np.zeros(self.n_envs, dtype=np.uint64)
         self.opp_bits = np.zeros(self.n_envs, dtype=np.uint64)
         self.done = np.zeros(self.n_envs, dtype=np.bool_)
 
-        # Cached legal mask (bool [n,49]) for convenience
         self.legal_mask = np.ones((self.n_envs, self.size * self.size), dtype=np.bool_)
 
     def reset(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -85,11 +84,11 @@ class I4EnvVec:
 
     def _compute_legal_mask(self, occupied_bits: np.ndarray) -> np.ndarray:
         """
-        occupied_bits: uint64 array shape (n_envs,)
-        Returns bool array shape (n_envs, 49) with True for empty squares.
+        occupied_bits: uint64 array shape (B,)
+        Returns bool array shape (B, 49) with True for empty squares.
         """
-        # Bit-test each position. For 49 squares this is cheap.
-        lm = np.empty((self.n_envs, self.size * self.size), dtype=np.bool_)
+        B = occupied_bits.shape[0]
+        lm = np.empty((B, self.size * self.size), dtype=np.bool_)
         for idx in range(self.size * self.size):
             bit = (np.uint64(1) << np.uint64(idx))
             lm[:, idx] = (occupied_bits & bit) == 0
@@ -97,12 +96,11 @@ class I4EnvVec:
 
     def _is_win(self, bits: np.ndarray) -> np.ndarray:
         """
-        bits: uint64 array shape (n_envs,)
-        Returns bool array shape (n_envs,) indicating if that player has 4-in-a-row.
+        bits: uint64 array shape (B,)
+        Returns bool array shape (B,) indicating if that player has 4-in-a-row.
         """
-        # Vectorized over masks: for each env, check any mask fully contained.
-        # Approach: iterate masks (only 56) and OR accumulate
-        w = np.zeros(self.n_envs, dtype=np.bool_)
+        B = bits.shape[0]
+        w = np.zeros(B, dtype=np.bool_)
         for m in self.win_masks:
             w |= (bits & m) == m
         return w
@@ -119,7 +117,6 @@ class I4EnvVec:
 
         alive = ~self.done
         if not np.any(alive):
-            # All done; return unchanged.
             return StepResult(
                 me_bits=self.me_bits.copy(),
                 opp_bits=self.opp_bits.copy(),
@@ -128,12 +125,9 @@ class I4EnvVec:
                 legal_mask=self.legal_mask.copy(),
             )
 
-        # Compute occupied bits for all envs (including done); we'll only apply updates on alive.
         occupied = self.me_bits | self.opp_bits
 
-        # Optional legality check
         if self.check_legal:
-            # For alive envs only
             for i in np.where(alive)[0]:
                 a = int(actions[i])
                 if a < 0 or a >= self.size * self.size:
@@ -142,32 +136,27 @@ class I4EnvVec:
                 if (occupied[i] & bit) != 0:
                     raise ValueError(f"Illegal action {a} on occupied square in env {i}")
 
-        # Apply moves for alive envs
+        # Apply moves to alive envs
         idxs = np.where(alive)[0]
-        # Set bits in me_bits
         for i in idxs:
             a = int(actions[i])
             self.me_bits[i] |= (np.uint64(1) << np.uint64(a))
 
-        # Check win for the mover (the "me" player who just played)
-        mover_win = np.zeros(self.n_envs, dtype=np.bool_)
-        mover_win[alive] = self._is_win(self.me_bits[alive])
+        # Compute wins for ALL envs (avoids shape mismatch on slices)
+        mover_win_all = self._is_win(self.me_bits)
+        just_won = alive & mover_win_all
 
-        # Check draw: board full and no win
         occupied_after = self.me_bits | self.opp_bits
         board_full = (occupied_after & self.full_mask) == self.full_mask
-        draw = alive & board_full & (~mover_win)
+        draw = alive & board_full & (~just_won)
 
-        # Terminal updates
-        just_won = alive & mover_win
         just_done = just_won | draw
         self.done[just_done] = True
 
-        # Rewards from POV of player-to-move (the mover)
         reward[just_won] = 1.0
         reward[draw] = 0.0
 
-        # For nonterminal envs, swap perspective to next player
+        # Swap perspective for continuing envs
         cont = alive & (~just_done)
         if np.any(cont):
             me_new = self.opp_bits[cont].copy()
@@ -175,7 +164,7 @@ class I4EnvVec:
             self.me_bits[cont] = me_new
             self.opp_bits[cont] = opp_new
 
-        # Update legal mask cache (for all envs; could be optimized to only alive)
+        # Update legal mask for all envs
         occupied_final = self.me_bits | self.opp_bits
         self.legal_mask = self._compute_legal_mask(occupied_final)
 
@@ -188,10 +177,6 @@ class I4EnvVec:
         )
 
     def sample_random_actions(self) -> np.ndarray:
-        """
-        Sample a random legal action for each env (ignoring done envs: returns 0 there).
-        Useful for sanity checks / baseline play.
-        """
         actions = np.zeros(self.n_envs, dtype=np.int64)
         for i in range(self.n_envs):
             if self.done[i]:

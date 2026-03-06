@@ -9,36 +9,33 @@ def bitboards_to_tensor(me_bits: torch.Tensor,
                         opp_bits: torch.Tensor,
                         board_size: int = 7) -> torch.Tensor:
     """
-    Convert bitboards to a (B, 2, 7, 7) float tensor with 0/1 planes.
+    Robust conversion bitboards -> (B,2,7,7) float tensor.
+    Works even when uint64 bitwise shifts aren't supported on CUDA by doing
+    the unpack on CPU, then moving the result back to the original device.
 
-    me_bits, opp_bits: torch tensors of shape (B,) dtype torch.uint64 (or int64 ok)
-    Returns:
-        x: float32 tensor shape (B, 2, board_size, board_size)
+    me_bits, opp_bits: shape (B,), integer dtype (uint64/int64)
+    Returns: float32 tensor on the same device as input.
     """
     assert board_size == 7, "This helper currently assumes 7x7 -> 49 bits."
     B = me_bits.shape[0]
-    device = me_bits.device
+    out_device = me_bits.device
 
-    # Create bit positions [0..48]
-    idx = torch.arange(board_size * board_size, device=device, dtype=torch.int64)  # (49,)
-    # Expand to (B,49)
-    idx = idx.unsqueeze(0).expand(B, -1)
+    # Move to CPU for bit ops (fast enough: B*49 is tiny for our use)
+    me_cpu = me_bits.detach().to("cpu", dtype=torch.int64)
+    opp_cpu = opp_bits.detach().to("cpu", dtype=torch.int64)
 
-    # Ensure unsigned-ish shifting works: cast to uint64 for bit ops
-    me_u = me_bits.to(torch.uint64).unsqueeze(1)   # (B,1)
-    opp_u = opp_bits.to(torch.uint64).unsqueeze(1) # (B,1)
+    idx = torch.arange(board_size * board_size, device="cpu", dtype=torch.int64)  # (49,)
+    idx = idx.unsqueeze(0).expand(B, -1)  # (B,49)
 
-    # (B,49) boolean occupancy by testing each bit
-    me_plane = ((me_u >> idx.to(torch.uint64)) & 1).to(torch.float32)
-    opp_plane = ((opp_u >> idx.to(torch.uint64)) & 1).to(torch.float32)
+    me_plane = ((me_cpu.unsqueeze(1) >> idx) & 1).to(torch.float32)   # (B,49)
+    opp_plane = ((opp_cpu.unsqueeze(1) >> idx) & 1).to(torch.float32) # (B,49)
 
-    # Reshape to (B,7,7) and stack channels -> (B,2,7,7)
     me_plane = me_plane.view(B, board_size, board_size)
     opp_plane = opp_plane.view(B, board_size, board_size)
 
-    x = torch.stack([me_plane, opp_plane], dim=1)
-    return x
+    x = torch.stack([me_plane, opp_plane], dim=1)  # (B,2,7,7)
 
+    return x.to(out_device, non_blocking=True)
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
